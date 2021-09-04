@@ -120,6 +120,10 @@ func (s *DiscoveryServer) pushXds(con *Connection, push *model.PushContext,
 	configSize := ResourceSize(res)
 	configSizeBytes.With(typeTag.Value(w.TypeUrl)).Record(float64(configSize))
 
+	// response data
+	//respJson, _ := json.MarshalIndent(resp, "", "\t")
+	log.Infof("[%s] response data: type->%s, resp->", v3.GetShortType(w.TypeUrl), w.TypeUrl)
+
 	if err := con.send(resp); err != nil {
 		recordSendError(w.TypeUrl, con.ConID, err)
 		return err
