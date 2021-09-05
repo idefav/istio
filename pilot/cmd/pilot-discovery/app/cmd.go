@@ -148,6 +148,10 @@ func addFlags(c *cobra.Command) {
 	c.PersistentFlags().StringVar((*string)(&serverArgs.RegistryOptions.KubeOptions.ClusterID), "clusterID", features.ClusterName,
 		"The ID of the cluster that this Istiod instance resides")
 
+	// Zookeeper
+	c.PersistentFlags().StringVar((*string)(&serverArgs.RegistryOptions.ZookeeperOptions.ZookeeperAddr), "zkAddress", "localhost:2181", "Zookeeper Address")
+	c.PersistentFlags().StringVar((*string)(&serverArgs.RegistryOptions.ZookeeperOptions.DiscoveryRootPath), "zkDiscoveryRootPath", "/services", "Zookeeper discovery root path")
+
 	// using address, so it can be configured as localhost:.. (possibly UDS in future)
 	c.PersistentFlags().StringVar(&serverArgs.ServerOptions.HTTPAddr, "httpAddr", ":8080",
 		"Discovery service HTTP address")

@@ -24,4 +24,6 @@ const (
 	Kubernetes ID = "Kubernetes"
 	// External is a service registry for externally provided ServiceEntries
 	External ID = "External"
+	// Zookeeper service registry for pilot
+	Zookeeper ID = "Zookeeper"
 )

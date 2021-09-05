@@ -16,6 +16,8 @@ package bootstrap
 
 import (
 	"fmt"
+	"istio.io/istio/pilot/pkg/serviceregistry/zookeeper"
+	"istio.io/istio/pkg/cluster"
 
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/serviceregistry"
@@ -57,6 +59,8 @@ func (s *Server) initServiceControllers(args *PilotArgs) error {
 			if err := s.initKubeRegistry(args); err != nil {
 				return err
 			}
+		case provider.Zookeeper:
+			s.initZookeeperRegistry(args)
 		case provider.Mock:
 			s.initMockRegistry()
 		default:
@@ -121,6 +125,17 @@ func (s *Server) initKubeRegistry(args *PilotArgs) (err error) {
 
 	s.multicluster = mc
 	return
+}
+
+func (s *Server) initZookeeperRegistry(args *PilotArgs) error {
+	args.RegistryOptions.ZookeeperOptions.ClusterID = cluster.ID(provider.Zookeeper)
+	controller, err := zookeeper.NewController(args.RegistryOptions.ZookeeperOptions.ZookeeperAddr,
+		args.RegistryOptions.ZookeeperOptions.DiscoveryRootPath, args.RegistryOptions.ZookeeperOptions.ClusterID)
+	if err != nil {
+		return err
+	}
+	s.ServiceController().AddRegistry(controller)
+	return nil
 }
 
 func (s *Server) initMockRegistry() {

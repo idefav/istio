@@ -17,6 +17,7 @@ package bootstrap
 import (
 	"crypto/tls"
 	"fmt"
+	"istio.io/istio/pilot/pkg/serviceregistry/zookeeper"
 	"time"
 
 	"istio.io/istio/pilot/pkg/features"
@@ -37,7 +38,8 @@ type RegistryOptions struct {
 	Registries []string
 
 	// Kubernetes controller options
-	KubeOptions kubecontroller.Options
+	KubeOptions      kubecontroller.Options
+	ZookeeperOptions zookeeper.Options
 	// ClusterRegistriesNamespace specifies where the multi-cluster secret resides
 	ClusterRegistriesNamespace string
 	KubeConfig                 string

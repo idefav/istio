@@ -68,6 +68,7 @@ require (
 	github.com/prometheus/common v0.30.0
 	github.com/prometheus/prometheus v2.5.0+incompatible
 	github.com/ryanuber/go-glob v1.0.0
+	github.com/samuel/go-zookeeper v0.0.0-20190923202752-2cc03de413da
 	github.com/spf13/cobra v1.2.1
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.8.1
