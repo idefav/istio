@@ -199,9 +199,9 @@ func (s *DiscoveryServer) processRequest(req *discovery.DiscoveryRequest, con *C
 	}
 
 	// request params
-	shortType := v3.GetShortType(req.GetTypeUrl())
+	//shortType := v3.GetShortType(req.GetTypeUrl())
 	//reqJson, _ := json.MarshalIndent(req, "", "\t")
-	log.Infof("[%s] request params: type->%s,req->%s", shortType, req.GetTypeUrl(), "miss")
+	//log.Infof("[%s] request params: type->%s,req->%s", shortType, req.GetTypeUrl(), "miss")
 	// For now, don't let xDS piggyback debug requests start watchers.
 	if strings.HasPrefix(req.TypeUrl, v3.DebugType) {
 		return s.pushXds(con, s.globalPushContext(), &model.WatchedResource{

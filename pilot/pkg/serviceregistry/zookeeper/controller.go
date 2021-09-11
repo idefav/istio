@@ -69,7 +69,7 @@ type Controller struct {
 	servicesList     []*model.Service
 	serviceInstances map[string][]*ZkServiceInstance
 	clusterId        cluster.ID
-	cacheMutex       sync.Mutex
+	cacheMutex       sync.RWMutex
 	XDSUpdater       model.XDSUpdater
 }
 
@@ -132,8 +132,6 @@ func (c *Controller) initCache() {
 	if err != nil {
 		return
 	}
-	c.cacheMutex.Lock()
-	defer c.cacheMutex.Unlock()
 	if len(services) > 0 {
 		for _, service := range services {
 
@@ -161,6 +159,7 @@ func (c *Controller) initCache() {
 	}
 }
 
+// 生成Instance实例模型数据
 func (c *Controller) genZkInstanceData(service string, instance string, zkInstanceData *ZkInstanceData, svc *model.Service) []*ZkServiceInstance {
 	instanceLabels := make(map[string]string)
 	instanceLabels["app"] = service
@@ -192,6 +191,8 @@ func (c *Controller) genZkInstanceData(service string, instance string, zkInstan
 
 // 生成服务模型信息
 func (c *Controller) genService(service string) *model.Service {
+	c.cacheMutex.RLock()
+	defer c.cacheMutex.RUnlock()
 	hostname := fmt.Sprintf("%s.%s.svc.zk", service, model.IstioDefaultConfigNamespace)
 	svc := &model.Service{
 		Address: "0.0.0.0",
@@ -285,23 +286,14 @@ func (c *Controller) handleInstanceDataWatch(service string, instance string, e 
 				switch event.Type {
 				case zk.EventNodeChildrenChanged:
 					// children changed
-					log.Printf("instance data changed, %s, %s", service, instance)
-					serviceObj := c.services[service]
-					instanceDataBytes, _ := c.client.Get(path.Join(c.client.DiscoveryRootPath, service, instance))
-					zkInstanceData := &ZkInstanceData{}
-					err := json.Unmarshal(instanceDataBytes, zkInstanceData)
-					if err != nil {
-						log.Printf("Resolve instance data failed, %s, %s", service, instance)
-						break
-					}
-
-					data := c.genZkInstanceData(service, instance, zkInstanceData, serviceObj)
-					c.serviceInstances[service] = data
-					c.xdsEdsUpdate(serviceObj.ClusterLocal.Hostname, c.serviceInstances[service])
 					break
 				case zk.EventNodeCreated:
 				case zk.EventNodeDeleted:
 				case zk.EventNodeDataChanged:
+					{
+						c.instanceDataChanged(service, instance)
+						break
+					}
 				default:
 
 				}
@@ -313,6 +305,26 @@ func (c *Controller) handleInstanceDataWatch(service string, instance string, e 
 	}
 }
 
+// 实例信息变动处理函数
+func (c *Controller) instanceDataChanged(service string, instance string) {
+	c.cacheMutex.Lock()
+	defer c.cacheMutex.Unlock()
+	log.Printf("instance data changed, %s, %s", service, instance)
+	serviceObj := c.services[service]
+	instanceDataBytes, _ := c.client.Get(path.Join(c.client.DiscoveryRootPath, service, instance))
+	zkInstanceData := &ZkInstanceData{}
+	err := json.Unmarshal(instanceDataBytes, zkInstanceData)
+	if err != nil {
+		log.Printf("Resolve instance data failed, %s, %s", service, instance)
+		return
+	}
+
+	data := c.genZkInstanceData(service, instance, zkInstanceData, serviceObj)
+	c.serviceInstances[service] = data
+	c.xdsEdsUpdate(serviceObj.ClusterLocal.Hostname, c.serviceInstances[service])
+}
+
+// 实例上下线变更 监听
 func (c *Controller) handleInstanceExistWatch(service string, instance string) {
 	for {
 		_, events, _ := c.client.ExistW(path.Join(c.client.DiscoveryRootPath, service, instance))
@@ -322,19 +334,7 @@ func (c *Controller) handleInstanceExistWatch(service string, instance string) {
 				switch event.Type {
 				case zk.EventNodeDeleted:
 					{
-						log.Printf("instance deleted: %s, %s", service, instance)
-						// 删除服务实例, 并取消监听
-						instances := c.serviceInstances[service]
-						for i, instan := range instances {
-							if instan.InstanceId == instance {
-								instances = append(instances[:i], instances[i+1:]...)
-								break
-							}
-						}
-						c.serviceInstances[service] = instances
-						serviceObj := c.services[service]
-						serviceInstances := c.serviceInstances[service]
-						c.xdsEdsUpdate(serviceObj.ClusterLocal.Hostname, serviceInstances)
+						c.instanceDeleted(service, instance)
 						return
 					}
 				}
@@ -343,6 +343,25 @@ func (c *Controller) handleInstanceExistWatch(service string, instance string) {
 
 		}
 	}
+}
+
+// 实例下线处理逻辑
+func (c *Controller) instanceDeleted(service string, instance string) {
+	c.cacheMutex.Lock()
+	defer c.cacheMutex.Unlock()
+	log.Printf("instance deleted: %s, %s", service, instance)
+	// 删除服务实例, 并取消监听
+	instances := c.serviceInstances[service]
+	for i, instan := range instances {
+		if instan.InstanceId == instance {
+			instances = append(instances[:i], instances[i+1:]...)
+			break
+		}
+	}
+	c.serviceInstances[service] = instances
+	serviceObj := c.services[service]
+	serviceInstances := c.serviceInstances[service]
+	c.xdsEdsUpdate(serviceObj.ClusterLocal.Hostname, serviceInstances)
 }
 
 // 监听服务变动
@@ -354,41 +373,7 @@ func (c *Controller) handleRootWatch(rootPath string, e <-chan zk.Event) {
 				log.Printf("change v: %s, %s", event.Path, event.Type)
 				switch event.Type {
 				case zk.EventNodeChildrenChanged:
-					// children changed
-					log.Printf("EventNodeChildrenChanged: %v", event)
-					// 服务数量发生变化, 重新生成服务列表
-					services, err := c.getServices(rootPath)
-					if err != nil {
-						log.Printf("%v", err)
-					}
-					// 找到变化的服务
-					// 判断有没有新增的服务,新增服务, 并设置监听
-					var svcAdded map[string]*model.Service
-					for _, service := range services {
-						_, ok := c.services[service]
-						if !ok {
-							log.Printf("new service dected, %s", service)
-							svcAdded[service] = nil
-						}
-					}
-
-					// 处理新增服务
-					for service, _ := range svcAdded {
-						instances, _ := c.getInstances(service)
-						genService := c.genService(service)
-						c.services[service] = genService
-						c.servicesList = append(c.servicesList, genService)
-						c.xdsSvcUpdate(genService.ClusterLocal.Hostname, model.EventAdd)
-						for _, instance := range instances {
-							data, _ := c.getInstanceData(service, instance)
-							instanceData := c.genZkInstanceData(service, instance, data, genService)
-							c.serviceInstances[service] = instanceData
-						}
-						serviceInstances := c.serviceInstances[service]
-						c.xdsEdsUpdate(genService.ClusterLocal.Hostname, serviceInstances)
-
-					}
-
+					c.serviceChanged(rootPath, event)
 					break
 				case zk.EventNodeCreated:
 				case zk.EventNodeDeleted:
@@ -405,16 +390,44 @@ func (c *Controller) handleRootWatch(rootPath string, e <-chan zk.Event) {
 
 }
 
-func (c *Controller) xdsSvcUpdate(hostName host.Name, event model.Event) {
-	c.XDSUpdater.SvcUpdate(model.ShardKeyFromRegistry(c), string(hostName), model.IstioDefaultConfigNamespace, event)
-}
-
-func (c *Controller) xdsEdsUpdate(hostName host.Name, serviceInstance []*ZkServiceInstance) {
-	var endpoints = []*model.IstioEndpoint{}
-	for _, instance := range serviceInstance {
-		endpoints = append(endpoints, instance.ServiceInstance.Endpoint)
+// 服务上下线处理逻辑
+func (c *Controller) serviceChanged(rootPath string, event zk.Event) {
+	c.cacheMutex.Lock()
+	defer c.cacheMutex.Unlock()
+	// children changed
+	log.Printf("EventNodeChildrenChanged: %v", event)
+	// 服务数量发生变化, 重新生成服务列表
+	services, err := c.getServices(rootPath)
+	if err != nil {
+		log.Printf("%v", err)
 	}
-	c.XDSUpdater.EDSUpdate(model.ShardKeyFromRegistry(c), string(hostName), model.IstioDefaultConfigNamespace, endpoints)
+	// 找到变化的服务
+	// 判断有没有新增的服务,新增服务, 并设置监听
+	var svcAdded map[string]*model.Service
+	for _, service := range services {
+		_, ok := c.services[service]
+		if !ok {
+			log.Printf("new service dected, %s", service)
+			svcAdded[service] = nil
+		}
+	}
+
+	// 处理新增服务
+	for service, _ := range svcAdded {
+		instances, _ := c.getInstances(service)
+		genService := c.genService(service)
+		c.services[service] = genService
+		c.servicesList = append(c.servicesList, genService)
+		c.xdsSvcUpdate(genService.ClusterLocal.Hostname, model.EventAdd)
+		for _, instance := range instances {
+			data, _ := c.getInstanceData(service, instance)
+			instanceData := c.genZkInstanceData(service, instance, data, genService)
+			c.serviceInstances[service] = instanceData
+		}
+		serviceInstances := c.serviceInstances[service]
+		c.xdsEdsUpdate(genService.ClusterLocal.Hostname, serviceInstances)
+
+	}
 }
 
 // 监听服务实例变动
@@ -426,29 +439,7 @@ func (c *Controller) handleServiceInstancesWatch(service string, e <-chan zk.Eve
 				log.Printf("service instances change v: %s, %s", event.Path, event.Type)
 				switch event.Type {
 				case zk.EventNodeChildrenChanged:
-					// children changed
-					log.Printf("EventNodeChildrenChanged: service: %s, event: %v", service, event)
-					// 获取缓存的所有实例
-					// 获取zk所有实例
-					instances := c.serviceInstances[service]
-					serviceObj := c.services[service]
-					// array to map
-					var instancesMap = make(map[string]*ZkServiceInstance)
-					for _, instance := range instances {
-						instancesMap[instance.InstanceId] = instance
-					}
-					children, _ := c.client.Children(path.Join(c.client.DiscoveryRootPath, service))
-					for _, child := range children {
-						if _, ok := instancesMap[child]; !ok {
-							// 新增的节点, 处理
-							log.Printf("new instance dected, %s, %s", service, child)
-							data, _ := c.getInstanceData(service, child)
-							instances = c.genZkInstanceData(service, child, data, serviceObj)
-							c.serviceInstances[service] = instances
-							c.xdsEdsUpdate(serviceObj.ClusterLocal.Hostname, instances)
-							break
-						}
-					}
+					c.instanceAdd(service, event)
 					break
 				case zk.EventNodeCreated:
 				case zk.EventNodeDeleted:
@@ -469,6 +460,36 @@ func (c *Controller) handleServiceInstancesWatch(service string, e <-chan zk.Eve
 
 }
 
+// 实例上线处理逻辑
+func (c *Controller) instanceAdd(service string, event zk.Event) {
+	c.cacheMutex.Lock()
+	defer c.cacheMutex.Unlock()
+	// children changed
+	log.Printf("EventNodeChildrenChanged: service: %s, event: %v", service, event)
+	// 获取缓存的所有实例
+	// 获取zk所有实例
+	instances := c.serviceInstances[service]
+	serviceObj := c.services[service]
+	// array to map
+	var instancesMap = make(map[string]*ZkServiceInstance)
+	for _, instance := range instances {
+		instancesMap[instance.InstanceId] = instance
+	}
+	children, _ := c.client.Children(path.Join(c.client.DiscoveryRootPath, service))
+	for _, child := range children {
+		if _, ok := instancesMap[child]; !ok {
+			// 新增的节点, 处理
+			log.Printf("new instance dected, %s, %s", service, child)
+			data, _ := c.getInstanceData(service, child)
+			instances = c.genZkInstanceData(service, child, data, serviceObj)
+			c.serviceInstances[service] = instances
+			c.xdsEdsUpdate(serviceObj.ClusterLocal.Hostname, instances)
+			break
+		}
+	}
+}
+
+// 服务上线下线监听
 func (c *Controller) handleServiceExistWatch(service string) {
 	for {
 		_, events, _ := c.client.ExistW(path.Join(c.client.DiscoveryRootPath, service))
@@ -478,20 +499,7 @@ func (c *Controller) handleServiceExistWatch(service string) {
 				switch event.Type {
 				case zk.EventNodeDeleted:
 					{
-						log.Printf("service deleted: %s", service)
-						// 删除服务实例, 并取消监听
-						serviceObj := c.services[service]
-						c.xdsSvcUpdate(serviceObj.ClusterLocal.Hostname, model.EventDelete)
-						c.xdsEdsUpdate(serviceObj.ClusterLocal.Hostname, c.serviceInstances[service])
-						delete(c.services, service)
-						delete(c.serviceInstances, service)
-						for i, svc := range c.servicesList {
-							if svc.Attributes.Name == service {
-								c.servicesList = append(c.servicesList[:i], c.servicesList[i+1:]...)
-
-								break
-							}
-						}
+						c.serviceDelete(service)
 						return
 					}
 				}
@@ -502,19 +510,52 @@ func (c *Controller) handleServiceExistWatch(service string) {
 	}
 }
 
+// 服务下线
+func (c *Controller) serviceDelete(service string) {
+	c.cacheMutex.Lock()
+	defer c.cacheMutex.Unlock()
+	log.Printf("service deleted: %s", service)
+	// 删除服务实例, 并取消监听
+	serviceObj := c.services[service]
+	c.xdsSvcUpdate(serviceObj.ClusterLocal.Hostname, model.EventDelete)
+	c.xdsEdsUpdate(serviceObj.ClusterLocal.Hostname, c.serviceInstances[service])
+	delete(c.services, service)
+	delete(c.serviceInstances, service)
+	for i, svc := range c.servicesList {
+		if svc.Attributes.Name == service {
+			c.servicesList = append(c.servicesList[:i], c.servicesList[i+1:]...)
+			break
+		}
+	}
+}
+
+// xds svc update
+func (c *Controller) xdsSvcUpdate(hostName host.Name, event model.Event) {
+	c.XDSUpdater.SvcUpdate(model.ShardKeyFromRegistry(c), string(hostName), model.IstioDefaultConfigNamespace, event)
+}
+
+// xds eds udpate
+func (c *Controller) xdsEdsUpdate(hostName host.Name, serviceInstance []*ZkServiceInstance) {
+	var endpoints []*model.IstioEndpoint
+	for _, instance := range serviceInstance {
+		endpoints = append(endpoints, instance.ServiceInstance.Endpoint)
+	}
+	c.XDSUpdater.EDSUpdate(model.ShardKeyFromRegistry(c), string(hostName), model.IstioDefaultConfigNamespace, endpoints)
+}
+
 func (c *Controller) HasSynced() bool {
 	return true
 }
 
 func (c *Controller) Services() ([]*model.Service, error) {
-	c.cacheMutex.Lock()
-	defer c.cacheMutex.Unlock()
+	c.cacheMutex.RLock()
+	defer c.cacheMutex.RUnlock()
 	return c.servicesList, nil
 }
 
 func (c *Controller) GetService(hostname host.Name) (*model.Service, error) {
-	c.cacheMutex.Lock()
-	defer c.cacheMutex.Unlock()
+	c.cacheMutex.RLock()
+	defer c.cacheMutex.RUnlock()
 	name, err := parseHostname(hostname)
 	if err != nil {
 		log.Printf("parseHostname(%s) => error %v", hostname, err)
@@ -528,8 +569,8 @@ func (c *Controller) GetService(hostname host.Name) (*model.Service, error) {
 }
 
 func (c *Controller) InstancesByPort(svc *model.Service, servicePort int, labels labels.Collection) []*model.ServiceInstance {
-	c.cacheMutex.Lock()
-	defer c.cacheMutex.Unlock()
+	c.cacheMutex.RLock()
+	defer c.cacheMutex.RUnlock()
 	name, err := parseHostname(host.Name(svc.Attributes.Name))
 	if err != nil {
 		log.Printf("parseHostname(%s) => error %v", svc.Attributes.Name, err)
@@ -553,8 +594,8 @@ func portMatch(instance *model.ServiceInstance, port int) bool {
 }
 
 func (c *Controller) GetProxyServiceInstances(proxy *model.Proxy) []*model.ServiceInstance {
-	c.cacheMutex.Lock()
-	defer c.cacheMutex.Unlock()
+	c.cacheMutex.RLock()
+	defer c.cacheMutex.RUnlock()
 	out := make([]*model.ServiceInstance, 0)
 	for _, instances := range c.serviceInstances {
 		for _, instance := range instances {
@@ -573,8 +614,8 @@ func (c *Controller) GetProxyServiceInstances(proxy *model.Proxy) []*model.Servi
 }
 
 func (c *Controller) GetProxyWorkloadLabels(proxy *model.Proxy) labels.Collection {
-	c.cacheMutex.Lock()
-	defer c.cacheMutex.Unlock()
+	c.cacheMutex.RLock()
+	defer c.cacheMutex.RUnlock()
 	out := make(labels.Collection, 0)
 	for _, instances := range c.serviceInstances {
 		for _, instance := range instances {
