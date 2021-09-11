@@ -403,30 +403,23 @@ func (c *Controller) serviceChanged(rootPath string, event zk.Event) {
 	}
 	// 找到变化的服务
 	// 判断有没有新增的服务,新增服务, 并设置监听
-	var svcAdded map[string]*model.Service
 	for _, service := range services {
 		_, ok := c.services[service]
 		if !ok {
 			log.Printf("new service dected, %s", service)
-			svcAdded[service] = nil
+			instances, _ := c.getInstances(service)
+			genService := c.genService(service)
+			c.services[service] = genService
+			c.servicesList = append(c.servicesList, genService)
+			c.xdsSvcUpdate(genService.ClusterLocal.Hostname, model.EventAdd)
+			for _, instance := range instances {
+				data, _ := c.getInstanceData(service, instance)
+				instanceData := c.genZkInstanceData(service, instance, data, genService)
+				c.serviceInstances[service] = instanceData
+			}
+			serviceInstances := c.serviceInstances[service]
+			c.xdsEdsUpdate(genService.ClusterLocal.Hostname, serviceInstances)
 		}
-	}
-
-	// 处理新增服务
-	for service, _ := range svcAdded {
-		instances, _ := c.getInstances(service)
-		genService := c.genService(service)
-		c.services[service] = genService
-		c.servicesList = append(c.servicesList, genService)
-		c.xdsSvcUpdate(genService.ClusterLocal.Hostname, model.EventAdd)
-		for _, instance := range instances {
-			data, _ := c.getInstanceData(service, instance)
-			instanceData := c.genZkInstanceData(service, instance, data, genService)
-			c.serviceInstances[service] = instanceData
-		}
-		serviceInstances := c.serviceInstances[service]
-		c.xdsEdsUpdate(genService.ClusterLocal.Hostname, serviceInstances)
-
 	}
 }
 
