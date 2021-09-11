@@ -129,8 +129,9 @@ func (s *Server) initKubeRegistry(args *PilotArgs) (err error) {
 
 func (s *Server) initZookeeperRegistry(args *PilotArgs) error {
 	args.RegistryOptions.ZookeeperOptions.ClusterID = cluster.ID(provider.Zookeeper)
+	args.RegistryOptions.ZookeeperOptions.XDSUpdater = s.XDSServer
 	controller, err := zookeeper.NewController(args.RegistryOptions.ZookeeperOptions.ZookeeperAddr,
-		args.RegistryOptions.ZookeeperOptions.DiscoveryRootPath, args.RegistryOptions.ZookeeperOptions.ClusterID)
+		args.RegistryOptions.ZookeeperOptions.DiscoveryRootPath, args.RegistryOptions.ZookeeperOptions.ClusterID, args.RegistryOptions.ZookeeperOptions.XDSUpdater)
 	if err != nil {
 		return err
 	}

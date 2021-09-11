@@ -70,20 +70,23 @@ type Controller struct {
 	serviceInstances map[string][]*ZkServiceInstance
 	clusterId        cluster.ID
 	cacheMutex       sync.Mutex
+	XDSUpdater       model.XDSUpdater
 }
 
 type Options struct {
 	ZookeeperAddr     string
 	DiscoveryRootPath string
 	ClusterID         cluster.ID
+	XDSUpdater        model.XDSUpdater
 }
 
-func NewController(addr string, discoveryRootPath string, clusterId cluster.ID) (*Controller, error) {
+func NewController(addr string, discoveryRootPath string, clusterId cluster.ID, xdsUpdater model.XDSUpdater) (*Controller, error) {
 	controller := Controller{}
 	zkClient := NewZkClient(strings.Split(addr, ","), discoveryRootPath, nil)
 
 	controller.client = zkClient
 	controller.clusterId = clusterId
+	controller.XDSUpdater = xdsUpdater
 	controller.services = make(map[string]*model.Service)
 	controller.servicesList = make([]*model.Service, 0)
 	controller.serviceInstances = make(map[string][]*ZkServiceInstance)
@@ -294,6 +297,7 @@ func (c *Controller) handleInstanceDataWatch(service string, instance string, e 
 
 					data := c.genZkInstanceData(service, instance, zkInstanceData, serviceObj)
 					c.serviceInstances[service] = data
+					c.xdsEdsUpdate(serviceObj.ClusterLocal.Hostname, c.serviceInstances[service])
 					break
 				case zk.EventNodeCreated:
 				case zk.EventNodeDeleted:
@@ -328,6 +332,9 @@ func (c *Controller) handleInstanceExistWatch(service string, instance string) {
 							}
 						}
 						c.serviceInstances[service] = instances
+						serviceObj := c.services[service]
+						serviceInstances := c.serviceInstances[service]
+						c.xdsEdsUpdate(serviceObj.ClusterLocal.Hostname, serviceInstances)
 						return
 					}
 				}
@@ -371,11 +378,15 @@ func (c *Controller) handleRootWatch(rootPath string, e <-chan zk.Event) {
 						genService := c.genService(service)
 						c.services[service] = genService
 						c.servicesList = append(c.servicesList, genService)
+						c.xdsSvcUpdate(genService.ClusterLocal.Hostname, model.EventAdd)
 						for _, instance := range instances {
 							data, _ := c.getInstanceData(service, instance)
 							instanceData := c.genZkInstanceData(service, instance, data, genService)
 							c.serviceInstances[service] = instanceData
 						}
+						serviceInstances := c.serviceInstances[service]
+						c.xdsEdsUpdate(genService.ClusterLocal.Hostname, serviceInstances)
+
 					}
 
 					break
@@ -392,6 +403,18 @@ func (c *Controller) handleRootWatch(rootPath string, e <-chan zk.Event) {
 		e = events
 	}
 
+}
+
+func (c *Controller) xdsSvcUpdate(hostName host.Name, event model.Event) {
+	c.XDSUpdater.SvcUpdate(model.ShardKeyFromRegistry(c), string(hostName), model.IstioDefaultConfigNamespace, event)
+}
+
+func (c *Controller) xdsEdsUpdate(hostName host.Name, serviceInstance []*ZkServiceInstance) {
+	var endpoints = []*model.IstioEndpoint{}
+	for _, instance := range serviceInstance {
+		endpoints = append(endpoints, instance.ServiceInstance.Endpoint)
+	}
+	c.XDSUpdater.EDSUpdate(model.ShardKeyFromRegistry(c), string(hostName), model.IstioDefaultConfigNamespace, endpoints)
 }
 
 // 监听服务实例变动
@@ -422,6 +445,7 @@ func (c *Controller) handleServiceInstancesWatch(service string, e <-chan zk.Eve
 							data, _ := c.getInstanceData(service, child)
 							instances = c.genZkInstanceData(service, child, data, serviceObj)
 							c.serviceInstances[service] = instances
+							c.xdsEdsUpdate(serviceObj.ClusterLocal.Hostname, instances)
 							break
 						}
 					}
@@ -456,11 +480,15 @@ func (c *Controller) handleServiceExistWatch(service string) {
 					{
 						log.Printf("service deleted: %s", service)
 						// 删除服务实例, 并取消监听
+						serviceObj := c.services[service]
+						c.xdsSvcUpdate(serviceObj.ClusterLocal.Hostname, model.EventDelete)
+						c.xdsEdsUpdate(serviceObj.ClusterLocal.Hostname, c.serviceInstances[service])
 						delete(c.services, service)
 						delete(c.serviceInstances, service)
 						for i, svc := range c.servicesList {
 							if svc.Attributes.Name == service {
 								c.servicesList = append(c.servicesList[:i], c.servicesList[i+1:]...)
+
 								break
 							}
 						}
