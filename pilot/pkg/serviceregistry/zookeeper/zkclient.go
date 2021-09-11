@@ -81,14 +81,14 @@ func (client *ZkClient) Set(path string, data []byte, version int32) error {
 }
 
 // Get the value of znode
-func (client *ZkClient) Get(path string) (string, error) {
+func (client *ZkClient) Get(path string) ([]byte, error) {
 	data, _, err := client.ZkConn.Get(path)
-	return string(data), err
+	return data, err
 }
 
-func (client *ZkClient) GetW(path string) (string, <-chan zk.Event, error) {
+func (client *ZkClient) GetW(path string) ([]byte, <-chan zk.Event, error) {
 	data, _, events, err := client.ZkConn.GetW(path)
-	return string(data), events, err
+	return data, events, err
 }
 
 // Delete znode
